@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>PING RUNNER – Le voyage d'une trame</title>
+<style>
+:root{--bg:#070b16;--panel:#0f1830;--line:#22335f;--ink:#e8f0ff;--mut:#8da2c8;--acc:#37e6a0;--warn:#ffb020;--bad:#ff4d6d;--mpls:#b46bff;--blue:#4da3ff}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);font-family:system-ui,"Segoe UI",Roboto,sans-serif}
+#wrap{max-width:1000px;margin:0 auto;padding:10px 12px 18px;display:flex;flex-direction:column;align-items:center;gap:10px}
+canvas{width:100%;aspect-ratio:16/9;display:block;background:#0a1020;border:1px solid var(--line);border-radius:12px;touch-action:none}
+#pad{display:flex;gap:10px;width:100%;max-width:520px}
+#pad button{flex:1;font-size:26px;padding:14px 0;border-radius:12px;border:1px solid var(--line);background:var(--panel);color:var(--ink);touch-action:manipulation}
+#pad button:active{background:#1b2c57}
+#hint{color:var(--mut);font-size:13px;text-align:center}
+#card{position:fixed;inset:0;display:none;align-items:flex-start;justify-content:center;padding:14px;background:rgba(4,7,16,.86);overflow:auto;z-index:5}
+.box{width:100%;max-width:740px;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px 20px;margin:auto}
+.box h2{margin:0 0 4px;font-size:22px}
+.box .sub{color:var(--mut);margin:0 0 12px;font-size:14px}
+.box p{line-height:1.5;margin:8px 0}
+table{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0}
+td,th{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{color:var(--mut);font-weight:600}
+td.chg{color:var(--acc);font-weight:600}
+.rep{background:#0b1327;border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:13px;line-height:1.5;margin:8px 0}
+.rep b.bad{color:var(--bad)}.rep b.ok{color:var(--acc)}
+.q{margin-top:12px;padding-top:10px;border-top:1px dashed var(--line)}
+.q h3{margin:0 0 8px;font-size:16px}
+.opt,.btn{display:block;width:100%;text-align:left;margin:6px 0;padding:11px 14px;border-radius:10px;border:1px solid var(--line);background:#0b1327;color:var(--ink);font-size:15px;cursor:pointer}
+.opt:hover,.btn:hover{border-color:var(--blue)}
+.opt.good{border-color:var(--acc);background:#0d2a22}.opt.bad{border-color:var(--bad);background:#2a0f19}
+.btn{text-align:center;background:linear-gradient(90deg,#1c7be0,#37e6a0);color:#04101a;font-weight:700;border:0;margin-top:14px}
+.legend{display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;font-size:13px;margin:10px 0}
+.legend div{background:#0b1327;border:1px solid var(--line);border-radius:8px;padding:6px 9px}
+pre{background:#050810;border:1px solid var(--line);border-radius:10px;padding:10px;font-size:12.5px;overflow:auto;color:#9dffcf;white-space:pre-wrap}
+.exp{background:#0b1327;border-left:3px solid var(--blue);padding:8px 12px;border-radius:6px;font-size:14px;margin-top:8px}
+@media(max-width:560px){.legend{grid-template-columns:1fr}.box{padding:14px}}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cv" width="960" height="540"></canvas>
+  <div id="pad"><button id="bUp" aria-label="Voie du haut">▲</button><button id="bQ" aria-label="QoS">⭐</button><button id="bDn" aria-label="Voie du bas">▼</button></div>
+  <div id="hint">↑/↓ ou W/S : changer de voie · Espace : activer la QoS ⭐ · M : son · Mobile : glisse ou boutons</div>
+</div>
+<div id="card"><div class="box" id="box"></div></div>
+
+<script>
+"use strict";
+/* ============ Données pédagogiques ============ */
+const W=960,H=540,LY=[215,305,395],PX=190,START_TTL=20,NCH=5;
+const NODES=[
+ {n:"PC",e:"💻",ip:"192.168.1.10"},
+ {n:"Switch",e:"🔀",router:false},
+ {n:"CPE (box client)",e:"📡",router:true},
+ {n:"PE entrée (LER)",e:"🏢",router:true},
+ {n:"P1 (LSR)",e:"🌐",router:true},
+ {n:"P2 (LSR)",e:"🌐",router:true},
+ {n:"PE sortie (LER)",e:"🏢",router:true},
+ {n:"Pare-feu",e:"🧱",router:true},
+ {n:"Serveur",e:"🖥️",ip:"203.0.113.80"}
+];
+// Chaque segment i va du noeud i au noeud i+1
+const SEGS=[
+ {name:"Câble Ethernet – LAN",len:3600,base:1,col:"#4da3ff",n:6,dbl:.1,w:{lat:2,loss:1,bit:2},lab:null},
+ {name:"Câble Ethernet – LAN",len:3700,base:1,col:"#4da3ff",n:7,dbl:.15,w:{lat:2,loss:2,bit:1,cong:2},lab:null},
+ {name:"Lien d'accès (fibre / xDSL)",len:3900,base:8,col:"#3be3a1",n:8,dbl:.2,w:{lat:4,loss:3,bit:3,jit:2,cong:1},lab:null},
+ {name:"Cœur MPLS – LSP, label 1001",len:4000,base:3,col:"#b46bff",n:8,dbl:.2,w:{lat:2,loss:2,cong:3,jit:2,loop:1},lab:"1001"},
+ {name:"Cœur MPLS – LSP, label 2002",len:4100,base:12,col:"#b46bff",n:9,dbl:.2,w:{lat:2,loss:2,cong:3,jit:3,loop:2},lab:"2002"},
+ {name:"Lien cœur – IP (label retiré)",len:4000,base:12,col:"#ff8f5a",n:8,dbl:.2,w:{lat:2,loss:2,cong:2,jit:1,loop:1},lab:null},
+ {name:"Lien opérateur → site distant",len:4800,base:3,col:"#ffd24d",n:6,dbl:.15,w:{loss:2,lat:2,bit:2,cong:1},lab:null,gates:2},
+ {name:"LAN du datacenter – dernière ligne droite !",len:4300,base:1,col:"#ff5a7a",n:9,dbl:.25,w:{lat:2,loss:2,bit:2,cong:2,jit:2,loop:1},lab:null}
+];
+const TIPS={
+ lat:["🐌 LATENCE","Délai de propagation + files d'attente : tu ralentis et ton RTT (temps aller-retour) grimpe."],
+ loss:["🕳️ PERTE DE PAQUETS","Un buffer plein ou un lien défaillant jette des octets. Il faudra les ré-émettre !"],
+ bit:["⚡ ERREUR BINAIRE","Un bit est inversé sur le câble : le CRC/FCS sera faux et la trame sera rejetée."],
+ jit:["🌊 GIGUE (JITTER)","Le délai varie de façon irrégulière : tu es secoué dans une autre voie !"],
+ cong:["🚛 CONGESTION","Le trafic des autres remplit la file d'attente : tail drop, tu perds un octet."],
+ loop:["🔁 BOUCLE DE ROUTAGE","Mauvaise route ! Tu recules et ton TTL chute de 3. À 0 : ICMP « Time Exceeded »."],
+ gate:["🔥 PARE-FEU (ACL)","Choisis la voie du protocole autorisé. Un ping, c'est de l'ICMP : pas de numéro de port !"],
+ qos:["⭐ QoS – DSCP EF","Priorité absolue 4 s : tu doubles tout le monde ! (mais pas les boucles ni l'ACL)"],
+ fec:["🧩 FEC","Correction d'erreur : un octet perdu ou corrompu est reconstruit."],
+ ack:["✅ ACK","Accusé de réception : bonus de points !"]
+};
+const INFO=[null,
+ {txt:"<b>Couche 2.</b> Le switch lit l'adresse MAC de destination, la cherche dans sa table CAM et pousse la trame vers le bon port. Il ne regarde <b>ni l'IP, ni le TTL</b> : il ne le décrémente donc pas.",
+  rows:[["Trame (MAC)","pc:10 → gw:01","pc:10 → gw:01",0],["Paquet IP","192.168.1.10 → 203.0.113.80","192.168.1.10 → 203.0.113.80",0],["MPLS","—","—",0]],
+  q:["Quelle information un switch utilise-t-il pour transférer une trame ?",["L'adresse MAC de destination","L'adresse IP de destination","Le numéro de port TCP"],"Le switch travaille en couche 2 : table MAC → port de sortie."]},
+ {txt:"Le <b>CPE</b> est le routeur du client. Il route vers Internet, <b>réécrit l'en-tête Ethernet</b> et fait du <b>NAT</b> : ton IP privée devient l'IP publique de la ligne. Le TTL baisse de 1.",
+  rows:[["Trame (MAC)","pc:10 → gw:01","cpe:wan → pe:a1",1],["Paquet IP","192.168.1.10 → 203.0.113.80","41.250.8.17 → 203.0.113.80",1],["MPLS","—","—",0]],
+  q:["À quoi sert le NAT sur le CPE ?",["Traduire l'IP privée en IP publique","Chiffrer tous les paquets","Supprimer le TTL"],"Le NAT permet à plusieurs machines privées de partager une IP publique."]},
+ {txt:"Le <b>PE d'entrée</b> (Provider Edge, aussi appelé LER) <b>pousse une étiquette MPLS</b> (push) devant ton paquet. Dans le cœur, plus besoin de lire l'IP : on commute sur le label, c'est rapide.",
+  rows:[["Trame (MAC)","cpe:wan → pe:a1","pe:a1 → p1:b1",1],["Paquet IP","41.250.8.17 → 203.0.113.80","41.250.8.17 → 203.0.113.80",0],["MPLS","—","Label 1001 (PUSH)",1]],
+  q:["Que fait le PE d'entrée (LER) de ton paquet ?",["Il ajoute (push) une étiquette MPLS","Il le découpe en fragments de 1500 octets","Il remplace ton IP par une adresse MAC"],"LER = Label Edge Router : il impose le label à l'entrée du réseau MPLS."]},
+ {txt:"<b>P1 est un LSR</b> (Label Switching Router) : il ne fait aucun lookup IP ! Il lit le label 1001, consulte sa table LFIB et le remplace par 2002 : c'est un <b>SWAP</b>.",
+  rows:[["Trame (MAC)","pe:a1 → p1:b1","p1:b2 → p2:c1",1],["Paquet IP","41.250.8.17 → 203.0.113.80","41.250.8.17 → 203.0.113.80",0],["MPLS","Label 1001","Label 2002 (SWAP)",1]],
+  q:["Sur quoi un routeur P (LSR) du cœur MPLS base-t-il sa décision ?",["Sur le label MPLS (table LFIB)","Sur la table de routage IP complète","Sur l'adresse MAC source"],"Les routeurs P du cœur ne connaissent que des labels : le cœur reste simple et rapide."]},
+ {txt:"<b>P2 est l'avant-dernier routeur</b> : il applique le <b>PHP</b> (Penultimate Hop Popping) et retire le label (<b>POP</b>) pour que le PE de sortie n'ait qu'un seul lookup à faire.",
+  rows:[["Trame (MAC)","p1:b2 → p2:c1","p2:c2 → pe:b1",1],["Paquet IP","41.250.8.17 → 203.0.113.80","41.250.8.17 → 203.0.113.80",0],["MPLS","Label 2002","— (POP / PHP)",1]],
+  q:["Que signifie PHP (Penultimate Hop Popping) ?",["L'avant-dernier routeur retire le label","Le premier routeur chiffre le paquet","Le dernier routeur duplique le paquet"],"Le PHP évite au PE de sortie un double travail (lookup label + lookup IP)."]},
+ {txt:"Le <b>PE de sortie</b> fait un vrai lookup IP dans la table de routage (VRF) du client, puis livre ton paquet vers le site distant. Nouvelle réécriture de l'en-tête Ethernet, TTL −1.",
+  rows:[["Trame (MAC)","p2:c2 → pe:b1","pe:b2 → fw:d1",1],["Paquet IP","41.250.8.17 → 203.0.113.80","41.250.8.17 → 203.0.113.80",0],["MPLS","—","—",0]],
+  q:["Pourquoi le TTL baisse-t-il de 1 à chaque routeur ?",["Pour éviter les boucles infinies","Pour mesurer la bande passante","Pour chiffrer le paquet"],"Si une boucle de routage existe, le TTL tombe à 0 et le paquet est détruit (ICMP Time Exceeded)."]},
+ {txt:"Le <b>pare-feu</b> applique ses ACL. Telnet (TCP 23) et SMB (445) sont bloqués, mais l'<b>ICMP Echo Request</b> est autorisé. S'il ne l'était pas, ton ping afficherait « Délai d'attente dépassé ».",
+  rows:[["Trame (MAC)","pe:b2 → fw:d1","fw:d2 → srv:e1",1],["Paquet IP","41.250.8.17 → 203.0.113.80","41.250.8.17 → 203.0.113.80",0],["MPLS","—","—",0]],
+  q:["Quel protocole utilise la commande ping ?",["ICMP (Echo Request / Echo Reply)","TCP port 80","UDP port 53"],"ICMP est un protocole de couche 3 : il n'utilise aucun port TCP/UDP."]}
+];
+const GLOSS=[["🐌 Latence","retard dû à la distance et aux files d'attente"],["🕳️ Perte de paquets","buffer plein ou lien défaillant"],["⚡ Erreur binaire","CRC/FCS invalide, trame rejetée"],["🌊 Gigue","variation irrégulière du délai"],["🚛 Congestion","tail drop quand la file est pleine"],["🔁 Boucle","le TTL protège le réseau"],["🔥 ACL","le pare-feu filtre par protocole/port"],["⭐ QoS","DSCP EF = file prioritaire"]];
+
+/* ============ Etat ============ */
+const cv=document.getElementById("cv"),ctx=cv.getContext("2d");
+const card=document.getElementById("card"),box=document.getElementById("box");
+const EMO='"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif';
+let G,best=0,mute=false,AC=null;
+try{best=+localStorage.getItem("pingrunner_best")||0}catch(e){}
+
+function newGame(){
+  G={state:"menu",seg:0,cam:0,ttl:START_TTL,rtt:0,ch:Array(NCH).fill(0),qos:0,qosT:0,score:0,retrans:0,quizOk:0,quizN:0,
+     lane:1,py:LY[1],inv:0,obs:[],pk:[],fx:[],fl:[],shake:0,t:0,inZone:false,seen:{},banner:null,bannerT:0,pickups:0,timeouts:0,loops:0,lost:0,corrupt:0,bonus:0,acl:0};
+}
+newGame();
+
+/* ============ Génération des segments ============ */
+function wpick(w){let s=0;for(const k in w)s+=w[k];let r=Math.random()*s;for(const k in w){r-=w[k];if(r<=0)return k}return Object.keys(w)[0]}
+function addObs(t,x,lane){
+  const o={t,x,lane,y:LY[lane],w:46,h:46,used:false,ph:Math.random()*6,vx:0};
+  if(t==="lat"){o.w=270;o.h=74}
+  if(t==="cong"){o.w=64;o.h=44}
+  G.obs.push(o);
+}
+function buildSeg(i){
+  const S=SEGS[i];G.obs=[];G.pk=[];
+  const x0=950,x1=S.len-(S.gates?2300:450),step=(x1-x0)/S.n;
+  for(let k=0;k<S.n;k++){
+    const x=x0+k*step+Math.random()*step*.2,lane=Math.floor(Math.random()*3),t=wpick(S.w);
+    addObs(t,x,lane);
+    if(t!=="loop"&&t!=="lat"&&Math.random()<S.dbl){
+      const w2={...S.w};delete w2.loop;delete w2.lat;
+      addObs(wpick(w2),x,(lane+1+Math.floor(Math.random()*2))%3);
+    }
+    if(Math.random()<.7){
+      const p=wpick({qos:3,fec:3,ack:2});
+      G.pk.push({t:p,x:x+step*.55,lane:Math.floor(Math.random()*3),got:false});
+    }
+  }
+  if(S.gates){
+    for(let g=0;g<S.gates;g++){
+      const labels=[{l:"TCP 23",ok:false},{l:"ICMP Echo",ok:true},{l:"SMB 445",ok:false}].sort(()=>Math.random()-.5);
+      G.obs.push({t:"gate",x:S.len-1400+g*800,labels,w:40,h:0,used:false,passed:false});
+    }
+  }
+}
+function startSeg(i){
+  G.seg=i;G.cam=0;G.state="play";G.inv=.8;
+  G.ch.fill(0);G.inZone=false;
+  buildSeg(i);
+  say(i===0?"GO ! Esquive les dangers du réseau":"Segment "+(i+1)+"/8 – "+SEGS[i].name,3);
+}
+
+/* ============ Utilitaires ============ */
+function beep(f,d=.08,type="square",v=.035){
+  if(mute)return;
+  try{AC=AC||new (window.AudioContext||window.webkitAudioContext)();
+    const o=AC.createOscillator(),g=AC.createGain();o.type=type;o.frequency.value=f;g.gain.value=v;
+    o.connect(g);g.connect(AC.destination);o.start();g.gain.exponentialRampToValueAtTime(.0001,AC.currentTime+d);o.stop(AC.currentTime+d)}catch(e){}
+}
+function say(t,s){G.banner=t;G.bannerT=s||3}
+function tip(k){if(!G.seen[k]){G.seen[k]=1;G.tip=TIPS[k];G.tipT=4.5}}
+function floater(txt,col,x,y){G.fl.push({txt,col,x:x==null?PX:x,y:(y==null?G.py:y)-30,life:1.1})}
+function burst(x,y,col,n=12){for(let i=0;i<n;i++)G.fx.push({x,y,vx:(Math.random()-.5)*320,vy:(Math.random()-.5)*320,life:.6,col})}
+function qosOn(){return G.qosT>0}
+
+/* ============ Règles ============ */
+function loseChunk(kind){ // kind 1 = perdu, 2 = corrompu
+  const idx=[];G.ch.forEach((c,i)=>{if(c===0)idx.push(i)});
+  if(!idx.length)return;
+  G.ch[idx[Math.floor(Math.random()*idx.length)]]=kind;
+  if(kind===1)G.lost++;else G.corrupt++;
+  G.shake=.25;burst(PX,G.py,kind===1?"#ff4d6d":"#ffb020");
+  beep(kind===1?120:200,.15,"sawtooth");
+  if(!G.ch.some(c=>c===0))timeout();
+}
+function timeout(){
+  G.rtt+=200;G.retrans++;G.timeouts++;
+  floater("⏱ TIMEOUT +200 ms","#ff4d6d");
+  buildSeg(G.seg);G.cam=0;G.ch.fill(0);G.inv=1.2;G.qosT=0;
+  say("⏱ Plus aucun octet utile : TIMEOUT ! Ré-émission depuis le début du lien",3.5);
+  beep(90,.4,"sawtooth",.05);
+}
+function useQos(){
+  if(G.state!=="play"||G.qos<=0||qosOn())return;
+  G.qos--;G.qosT=4;beep(880,.2,"triangle");floater("QoS ON !","#ffd24d");
+}
+function setLane(d){
+  if(G.state!=="play")return;
+  const l=Math.max(0,Math.min(2,G.lane+d));
+  if(l!==G.lane){G.lane=l;beep(440+l*60,.04,"square",.02)}
+}
+
+/* ============ Mise à jour ============ */
+function update(dt){
+  G.t+=dt;
+  if(G.bannerT>0)G.bannerT-=dt;
+  if(G.tipT>0)G.tipT-=dt;
+  G.fx.forEach(p=>{p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=dt});G.fx=G.fx.filter(p=>p.life>0);
+  G.fl.forEach(f=>{f.y-=40*dt;f.life-=dt});G.fl=G.fl.filter(f=>f.life>0);
+  if(G.shake>0)G.shake-=dt;
+  if(G.state==="enter"){G.cam+=260*dt;if(G.cam>=SEGS[G.seg].len+70)arrive();return}
+  if(G.state!=="play")return;
+  const S=SEGS[G.seg];
+  if(G.inv>0)G.inv-=dt;
+  if(G.qosT>0)G.qosT-=dt;
+  G.py+=(LY[G.lane]-G.py)*Math.min(1,dt*16);
+  const spd=(285+G.seg*14)*(G.inZone&&!qosOn()?.45:1)*(qosOn()?1.25:1);
+  G.cam+=spd*dt;
+  let inZone=false;
+  const near=o=>o.x-G.cam+PX;
+  for(const o of G.obs){
+    if(o.t==="gate"){gateCheck(o);continue}
+    if(o.t==="jit"){o.y=LY[o.lane]+Math.sin(G.t*2.3+o.ph)*80}
+    else if(o.t==="cong"){const sx=near(o);if(sx<W+120)o.x-=130*dt;o.y=LY[o.lane]}
+    else o.y=LY[o.lane];
+    const sx=near(o);
+    if(sx<-300||sx>W+400)continue;
+    if(o.t!=="lat"&&o.t!=="loop"&&sx<W&&sx>0)tip(o.t);
+    if(o.t==="lat"&&sx<W&&sx>-200)tip("lat");
+    if(o.used)continue;
+    const hit=Math.abs(sx-PX)<o.w/2+30&&Math.abs(o.y-G.py)<o.h/2+18;
+    if(!hit)continue;
+    if(o.t==="lat"){if(!qosOn()){inZone=true;G.rtt+=60*dt}continue}
+    if(G.inv>0)continue;
+    if(o.t==="loop"){o.used=true;G.loops++;G.ttl-=3;G.cam-=260;G.inv=1;G.shake=.4;burst(PX,G.py,"#ff5ad0",18);
+      floater("TTL −3  🔁","#ff5ad0");beep(150,.3,"sawtooth");if(G.ttl<=0){gameOver();return}continue}
+    if(qosOn()){o.used=true;floater("priorité ⭐","#ffd24d");continue}
+    o.used=true;
+    if(o.t==="loss"){loseChunk(1);floater("−1 octet (perte)","#ff4d6d")}
+    else if(o.t==="bit"){loseChunk(2);floater("octet corrompu !","#ffb020")}
+    else if(o.t==="cong"){loseChunk(1);G.cam-=100;G.rtt+=15;floater("tail drop −1 octet","#ff4d6d")}
+    else if(o.t==="jit"){G.lane=Math.floor(Math.random()*3);G.rtt+=12;G.shake=.3;floater("gigue +12 ms","#4da3ff");beep(300,.12,"triangle")}
+    if(G.state!=="play")return;
+  }
+  G.inZone=inZone;
+  for(const p of G.pk){
+    if(p.got)continue;
+    const sx=p.x-G.cam+PX;
+    if(sx<W&&sx>0)tip(p.t);
+    if(Math.abs(sx-PX)<40&&Math.abs(LY[p.lane]-G.py)<38){
+      p.got=true;G.pickups++;burst(sx,LY[p.lane],"#37e6a0",10);beep(990,.1,"triangle");
+      if(p.t==="qos"){if(G.qos<2)G.qos++;floater("+1 QoS ⭐","#ffd24d")}
+      else if(p.t==="fec"){const i=G.ch.findIndex(c=>c!==0);if(i>=0){G.ch[i]=0;floater("octet réparé 🧩","#37e6a0")}else floater("FEC (rien à réparer)","#8da2c8")}
+      else {G.score+=40;floater("+40 ACK ✅","#37e6a0")}
+    }
+  }
+  if(G.cam<0)G.cam=0;
+  if(G.cam>=S.len){G.state="enter"}
+}
+function gateCheck(g){
+  const sx=g.x-G.cam+PX;
+  if(sx<W&&sx>0)tip("gate");
+  if(g.used||g.passed)return;
+  if(Math.abs(sx-PX)<g.w/2+30){
+    if(g.labels[G.lane].ok){g.passed=true;G.score+=50;G.acl++;floater("ACL : ICMP autorisé ✔ +50","#37e6a0");beep(700,.12,"triangle")}
+    else{
+      g.used=true;g.bounced=true;G.cam-=220;G.inv=1.2;G.shake=.4;
+      loseChunk(1);if(G.state==="play")loseChunk(1);
+      floater("ACL DENY ✘ (ICMP type 3, code 13)","#ff4d6d");
+      say("Destination unreachable – administratively prohibited ! Prends la voie ICMP",3.5);
+      setTimeout(()=>{g.used=false},900);
+    }
+  }
+}
+
+/* ============ Stations / écrans ============ */
+function arrive(){
+  const n=G.seg+1,node=NODES[n],S=SEGS[G.seg];
+  G.rtt+=S.base;
+  if(n===NODES.length-1){win();return}
+  const lost=G.ch.filter(c=>c===1).length,bad=G.ch.filter(c=>c===2).length,okc=G.ch.filter(c=>c===0).length;
+  const ttlBefore=G.ttl;
+  if(node.router)G.ttl--;
+  const pen=lost*30+bad*40;G.rtt+=pen;G.retrans+=lost+bad;
+  G.score+=100+okc*20;
+  G.ch.fill(0);
+  G.state="station";
+  if(G.ttl<=0){gameOver();return}
+  beep(660,.1,"triangle");beep(880,.15,"triangle");
+  const I=INFO[n];
+  let rep='<div class="rep"><b class="ok">✔ '+okc+'/'+NCH+' octets arrivés intacts.</b><br>';
+  if(lost)rep+='<b class="bad">'+lost+' octet(s) perdu(s)</b> : ré-émission nécessaire (+'+lost*30+' ms).<br>';
+  if(bad)rep+='<b class="bad">'+bad+' octet(s) corrompu(s)</b> : CRC/FCS invalide, la trame est jetée par '+node.n+' puis ré-émise (+'+bad*40+' ms).<br>';
+  if(!lost&&!bad)rep+='Aucune perte sur ce lien, bravo !<br>';
+  rep+='RTT cumulé : <b>'+Math.round(G.rtt)+' ms</b> · TTL : <b>'+ttlBefore+(node.router?' → '+G.ttl:' (inchangé)')+'</b></div>';
+  let rows='<table><tr><th></th><th>Avant</th><th>Après</th></tr>'+I.rows.map(r=>'<tr><td>'+r[0]+'</td><td>'+r[1]+'</td><td class="'+(r[3]?'chg':'')+'">'+r[2]+'</td></tr>').join("")+
+    '<tr><td>TTL</td><td>'+ttlBefore+'</td><td class="'+(node.router?'chg':'')+'">'+G.ttl+'</td></tr></table>';
+  const opts=I.q[1].map((t,i)=>({t,ok:i===0})).sort(()=>Math.random()-.5);
+  box.innerHTML='<h2>'+node.e+' '+node.n+'</h2><p class="sub">Étape '+n+'/8 atteinte</p><p>'+I.txt+'</p>'+rows+rep+
+    '<div class="q"><h3>🎓 Quiz bonus (+150) : '+I.q[0]+'</h3>'+opts.map((o,i)=>'<button class="opt" data-ok="'+(o.ok?1:0)+'">'+o.t+'</button>').join("")+
+    '<div id="exp"></div></div><button class="btn" id="go" style="display:none">Continuer vers le saut suivant ▶</button>';
+  card.style.display="flex";
+  const go=document.getElementById("go");
+  box.querySelectorAll(".opt").forEach(b=>b.onclick=()=>{
+    if(b.dataset.done)return;
+    box.querySelectorAll(".opt").forEach(x=>{x.dataset.done=1;if(x.dataset.ok==="1")x.classList.add("good")});
+    G.quizN++;
+    if(b.dataset.ok==="1"){G.quizOk++;G.score+=150;beep(900,.15,"triangle")}else{b.classList.add("bad");beep(160,.25,"sawtooth")}
+    document.getElementById("exp").innerHTML='<div class="exp">'+(b.dataset.ok==="1"?"✅ Bonne réponse ! ":"❌ Raté. ")+I.q[2]+'</div>';
+    go.style.display="block";go.scrollIntoView({block:"nearest"});
+  });
+  go.onclick=()=>{card.style.display="none";startSeg(G.seg+1)};
+}
+function showIntro(){
+  G.state="menu";
+  box.innerHTML='<h2>📡 PING RUNNER</h2><p class="sub">Le voyage d\'une trame du PC jusqu\'au serveur</p>'+
+  '<p>Tu es une <b>requête ICMP Echo (ping)</b> composée de '+NCH+' octets de données. Ta mission : traverser <b>PC → Switch → CPE → PE → cœur MPLS → PE → pare-feu → Serveur</b> sans perdre ta charge utile ni ton TTL. À chaque routeur, tu verras comment tes en-têtes sont réécrits.</p>'+
+  '<p><b>Commandes :</b> ↑ / ↓ (ou W / S, ou glisser) pour changer de voie · <b>Espace</b> (ou ⭐) pour activer la QoS.</p>'+
+  '<div class="legend">'+
+  '<div>🐌 <b>Latence</b> : te ralentit, RTT +</div><div>🕳️ <b>Perte</b> : −1 octet</div><div>⚡ <b>Erreur binaire</b> : octet corrompu</div>'+
+  '<div>🌊 <b>Gigue</b> : te pousse dans une autre voie</div><div>🚛 <b>Congestion</b> : tail drop, −1 octet</div><div>🔁 <b>Boucle</b> : TTL −3 et recul !</div>'+
+  '<div>⭐ <b>QoS</b> : 4 s de priorité</div><div>🧩 <b>FEC</b> : répare un octet</div><div>🔥 <b>ACL</b> : choisis la voie ICMP</div></div>'+
+  '<p>Si tous tes octets sont perdus : <b>timeout</b>, retour au début du lien. Si ton <b>TTL tombe à 0</b> : <i>Time Exceeded</i>, game over.</p>'+
+  (best?'<p>🏆 Meilleur score : <b>'+best+'</b></p>':'')+
+  '<button class="btn" id="go">Envoyer le ping ▶</button>';
+  card.style.display="flex";
+  document.getElementById("go").onclick=()=>{card.style.display="none";newGame();G.seen={};startSeg(0);beep(520,.1,"triangle")};
+}
+function gameOver(){
+  G.state="over";
+  beep(100,.6,"sawtooth",.05);
+  box.innerHTML='<h2>💀 Time to live exceeded in transit</h2><p class="sub">ICMP Type 11 – Time Exceeded</p>'+
+  '<p>Ton <b>TTL est tombé à 0</b> au niveau de <b>'+NODES[Math.min(G.seg+1,8)].n+'</b>. Le routeur t\'a jeté et a envoyé un message d\'erreur ICMP à la source.</p>'+
+  '<div class="exp">💡 C\'est exactement le principe de <b>traceroute</b> : il envoie des paquets avec un TTL de 1, 2, 3… pour que chaque routeur du chemin se « dénonce » avec un Time Exceeded.</div>'+
+  '<p>Score : <b>'+G.score+'</b></p><button class="btn" id="go">Réessayer ↻</button>';
+  card.style.display="flex";
+  document.getElementById("go").onclick=showIntro;
+}
+function win(){
+  G.state="win";
+  const rtt=Math.round(G.rtt),ret=60;
+  const final=G.score+Math.max(0,2000-rtt*3)+G.ttl*20;
+  G.score=final;
+  if(final>best){best=final;try{localStorage.setItem("pingrunner_best",best)}catch(e){}}
+  const rank=rtt<90?["🏆","Ingénieur réseau – fibre noire !"]:rtt<160?["🚀","Backbone – excellent trajet"]:rtt<260?["📶","ADSL correct – tu peux mieux faire"]:["🐢","Liaison satellite – révise tes TTL !"];
+  beep(523,.12,"triangle");setTimeout(()=>beep(659,.12,"triangle"),130);setTimeout(()=>beep(784,.25,"triangle"),260);
+  const reply=NODES.filter(n=>n.router).length;
+  box.innerHTML='<h2>'+rank[0]+' Echo Reply reçu !</h2><p class="sub">'+rank[1]+'</p>'+
+  '<pre>C:\\&gt; ping 203.0.113.80\n\nEnvoi d\'une requête \'ping\' sur 203.0.113.80 avec 32 octets de données :\nRéponse de 203.0.113.80 : octets=32 temps='+rtt+'ms TTL='+(64-reply)+'\n\nStatistiques Ping pour 203.0.113.80 :\n    Paquets : envoyés = 1, reçus = 1, perdus = 0 (0% de perte)\n    Durée approximative en ms : minimum = '+rtt+'ms, maximum = '+rtt+'ms</pre>'+
+  '<p>Score final : <b>'+final+'</b> (record : '+best+') · RTT : <b>'+rtt+' ms</b> · TTL restant : <b>'+G.ttl+'</b> · Quiz : <b>'+G.quizOk+'/'+G.quizN+'</b></p>'+
+  '<div class="rep">Octets perdus : <b>'+G.lost+'</b> · corrompus : <b>'+G.corrupt+'</b> · ré-émissions : <b>'+G.retrans+'</b> · timeouts : <b>'+G.timeouts+'</b> · boucles : <b>'+G.loops+'</b> · pare-feu passés : <b>'+G.acl+'</b></div>'+
+  '<div class="exp">💡 <b>Le savais-tu ?</b> Un vrai ping (ICMP) ne ré-émet jamais : un paquet perdu s\'affiche simplement « Délai d\'attente dépassé ». C\'est TCP qui ré-émet. Ici, tes ré-émissions montrent pourquoi la perte de paquets augmente la latence perçue.</div>'+
+  '<table><tr><th colspan="2">Glossaire du trajet</th></tr>'+GLOSS.map(g=>'<tr><td>'+g[0]+'</td><td>'+g[1]+'</td></tr>').join("")+'</table>'+
+  '<button class="btn" id="go">Rejouer ↻</button>';
+  card.style.display="flex";
+  document.getElementById("go").onclick=showIntro;
+}
+
+/* ============ Rendu ============ */
+function rr(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath()}
+function emoji(e,x,y,s){ctx.font=s+"px "+EMO;ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText(e,x,y)}
+function text(t,x,y,s,col,al,w){ctx.font=(w||"600")+" "+s+"px system-ui,sans-serif";ctx.textAlign=al||"left";ctx.textBaseline="middle";ctx.fillStyle=col;ctx.fillText(t,x,y)}
+
+function drawBg(){
+  const S=SEGS[Math.min(G.seg,7)],col=S.col;
+  const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,"#070b18");g.addColorStop(1,"#101a36");ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+  // grille parallaxe
+  ctx.strokeStyle="rgba(120,150,220,.08)";ctx.lineWidth=1;
+  const off=(G.cam*.4)%60;
+  for(let x=-off;x<W;x+=60){ctx.beginPath();ctx.moveTo(x,120);ctx.lineTo(x,H);ctx.stroke()}
+  for(let y=120;y<H;y+=60){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke()}
+  // tube du lien
+  ctx.fillStyle="rgba(0,0,0,.35)";ctx.fillRect(0,LY[0]-48,W,LY[2]-LY[0]+96);
+  ctx.strokeStyle=col;ctx.globalAlpha=.8;ctx.lineWidth=3;ctx.shadowColor=col;ctx.shadowBlur=14;
+  ctx.beginPath();ctx.moveTo(0,LY[0]-48);ctx.lineTo(W,LY[0]-48);ctx.moveTo(0,LY[2]+48);ctx.lineTo(W,LY[2]+48);ctx.stroke();
+  ctx.shadowBlur=0;ctx.globalAlpha=1;
+  ctx.strokeStyle="rgba(255,255,255,.14)";ctx.setLineDash([22,18]);ctx.lineWidth=2;
+  for(let i=0;i<2;i++){const y=(LY[i]+LY[i+1])/2;ctx.lineDashOffset=G.cam%40;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke()}
+  ctx.setLineDash([]);
+  // étiquettes MPLS qui défilent
+  if(S.lab){ctx.globalAlpha=.18;for(let x=-((G.cam*.8)%320);x<W;x+=320)text("🏷 "+S.lab+"  LSP",x+40,LY[1]-72,18,"#d9b8ff","left","700");ctx.globalAlpha=1}
+  else {ctx.globalAlpha=.12;for(let x=-((G.cam*.8)%320);x<W;x+=320)text("ICMP · TTL "+G.ttl,x+40,LY[1]-72,16,"#fff","left","700");ctx.globalAlpha=1}
+}
+function drawNode(n,wx,big){
+  const sx=wx-G.cam+PX;if(sx<-120||sx>W+120)return;
+  ctx.fillStyle="rgba(255,255,255,.06)";rr(sx-48,LY[0]-60,96,LY[2]-LY[0]+120,16);ctx.fill();
+  emoji(NODES[n].e,sx,LY[1],big?64:56);
+  text(NODES[n].n,sx,LY[2]+70,14,"#cfe0ff","center","700");
+}
+function drawObs(o){
+  if(o.t==="gate"){
+    const sx=o.x-G.cam+PX;if(sx<-100||sx>W+100)return;
+    for(let l=0;l<3;l++){
+      const ok=o.labels[l].ok;ctx.globalAlpha=o.passed?.35:1;
+      ctx.fillStyle=ok?"rgba(55,230,160,.18)":"rgba(255,77,109,.35)";
+      rr(sx-20,LY[l]-42,40,84,8);ctx.fill();
+      ctx.strokeStyle=ok?"#37e6a0":"#ff4d6d";ctx.lineWidth=2;ctx.stroke();
+      ctx.save();ctx.translate(sx,LY[l]);ctx.rotate(-Math.PI/2);text(o.labels[l].l,0,0,13,"#fff","center","800");ctx.restore();
+      if(!ok)emoji("🔥",sx,LY[l]-52,20);
+    }
+    ctx.globalAlpha=1;return;
+  }
+  const sx=o.x-G.cam+PX;if(sx<-300||sx>W+200)return;
+  ctx.globalAlpha=o.used&&o.t!=="lat"?.25:1;
+  if(o.t==="lat"){
+    ctx.fillStyle="rgba(255,176,32,"+(.14+.05*Math.sin(G.t*4))+")";rr(sx-o.w/2,o.y-37,o.w,74,14);ctx.fill();
+    ctx.strokeStyle="rgba(255,176,32,.7)";ctx.setLineDash([8,6]);ctx.lineWidth=2;ctx.stroke();ctx.setLineDash([]);
+    emoji("🐌",sx,o.y,34);text("+ms",sx+60,o.y,13,"#ffb020","left","800");
+  }else if(o.t==="loss"){
+    ctx.fillStyle="#000";ctx.beginPath();ctx.ellipse(sx,o.y,30,22,0,0,7);ctx.fill();
+    ctx.strokeStyle="#ff4d6d";ctx.lineWidth=2;ctx.stroke();emoji("🕳️",sx,o.y,30);
+  }else if(o.t==="bit"){
+    ctx.shadowColor="#ffb020";ctx.shadowBlur=16;emoji("⚡",sx,o.y,38);ctx.shadowBlur=0;
+    text(Math.floor(G.t*5)%2?"0":"1",sx+22,o.y-18,13,"#ffb020","center","800");
+  }else if(o.t==="jit"){emoji("🌊",sx,o.y,38)}
+  else if(o.t==="cong"){emoji("🚛",sx,o.y,40)}
+  else if(o.t==="loop"){
+    ctx.fillStyle="rgba(255,90,208,.25)";ctx.beginPath();ctx.arc(sx,o.y,30,0,7);ctx.fill();
+    ctx.save();ctx.translate(sx,o.y);ctx.rotate(G.t*2);emoji("🔁",0,0,36);ctx.restore();
+  }
+  ctx.globalAlpha=1;
+}
+function drawPick(p){
+  if(p.got)return;const sx=p.x-G.cam+PX;if(sx<-60||sx>W+60)return;
+  const y=LY[p.lane]+Math.sin(G.t*4+p.x)*5;
+  ctx.shadowColor="#37e6a0";ctx.shadowBlur=14;emoji(p.t==="qos"?"⭐":p.t==="fec"?"🧩":"✅",sx,y,32);ctx.shadowBlur=0;
+}
+function drawPacket(){
+  const S=SEGS[Math.min(G.seg,7)];
+  const entering=G.state==="enter";
+  if(entering&&G.cam>S.len+55)return;
+  ctx.save();ctx.translate(PX,G.py);
+  if(G.inv>0&&Math.floor(G.t*20)%2)ctx.globalAlpha=.45;
+  if(qosOn()){ctx.shadowColor="#ffd24d";ctx.shadowBlur=28;ctx.fillStyle="rgba(255,210,77,.15)";ctx.beginPath();ctx.arc(0,0,48,0,7);ctx.fill()}
+  ctx.fillStyle="#0e2a3d";rr(-34,-20,68,40,8);ctx.fill();
+  ctx.strokeStyle=qosOn()?"#ffd24d":"#37e6a0";ctx.lineWidth=2.5;ctx.stroke();ctx.shadowBlur=0;
+  ctx.fillStyle=S.lab?"#b46bff":"#4da3ff";rr(-34,-20,24,40,8);ctx.fill();
+  // yeux
+  ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(-27,-5,4.5,0,7);ctx.arc(-17,-5,4.5,0,7);ctx.fill();
+  ctx.fillStyle="#000";ctx.beginPath();ctx.arc(-25.5,-5,2,0,7);ctx.arc(-15.5,-5,2,0,7);ctx.fill();
+  ctx.strokeStyle="#000";ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(-22,6,5,.1,Math.PI-.1);ctx.stroke();
+  // octets
+  for(let i=0;i<NCH;i++){
+    const c=G.ch[i],x=-6+i*8;
+    if(c===0){ctx.fillStyle="#37e6a0";rr(x,-11,6,22,2);ctx.fill()}
+    else if(c===2){ctx.fillStyle="#ff4d6d";rr(x,-11,6,22,2);ctx.fill()}
+    else{ctx.strokeStyle="rgba(255,255,255,.25)";ctx.lineWidth=1;ctx.setLineDash([2,2]);rr(x,-11,6,22,2);ctx.stroke();ctx.setLineDash([])}
+  }
+  // puce au-dessus
+  const lab=S.lab?"🏷 "+S.lab:"ICMP";
+  ctx.font="700 11px system-ui";const w=ctx.measureText(lab).width+14;
+  ctx.fillStyle=S.lab?"#b46bff":"#2b4a7a";rr(-w/2,-42,w,16,8);ctx.fill();
+  text(lab,0,-34,11,"#fff","center","700");
+  ctx.restore();
+}
+function drawHud(){
+  // mini-carte
+  const x0=60,x1=W-60,y=28;
+  ctx.fillStyle="rgba(5,8,18,.7)";ctx.fillRect(0,0,W,64);
+  ctx.strokeStyle="#22335f";ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(x0,y);ctx.lineTo(x1,y);ctx.stroke();
+  const prog=Math.min(8,G.seg+Math.min(1,G.cam/SEGS[Math.min(G.seg,7)].len));
+  ctx.strokeStyle="#37e6a0";ctx.beginPath();ctx.moveTo(x0,y);ctx.lineTo(x0+(x1-x0)*prog/8,y);ctx.stroke();
+  NODES.forEach((n,i)=>{const nx=x0+(x1-x0)*i/8;ctx.globalAlpha=i<=prog?1:.5;emoji(n.e,nx,y,i%2?20:22);});
+  ctx.globalAlpha=1;
+  ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(x0+(x1-x0)*prog/8,y+19,4,0,7);ctx.fill();
+  // stats
+  const ttlCol=G.ttl<=6?"#ff4d6d":G.ttl<=10?"#ffb020":"#e8f0ff";
+  text("TTL "+G.ttl,16,84,20,ttlCol,"left","800");
+  text("RTT "+Math.round(G.rtt)+" ms",120,84,20,"#e8f0ff","left","800");
+  text("Score "+G.score,300,84,16,"#8da2c8","left","700");
+  text(G.qos?("⭐".repeat(G.qos)):"",W-16,84,20,"#ffd24d","right");
+  if(qosOn()){ctx.fillStyle="#ffd24d";ctx.fillRect(W-120,96,110*G.qosT/4,5)}
+  text("Segment "+(Math.min(G.seg,7)+1)+"/8 · "+SEGS[Math.min(G.seg,7)].name,W/2,H-20,14,"#8da2c8","center","600");
+}
+function drawBanners(){
+  if(G.bannerT>0&&G.banner){
+    ctx.globalAlpha=Math.min(1,G.bannerT);ctx.fillStyle="rgba(5,8,18,.8)";ctx.font="700 18px system-ui";
+    const w=Math.min(W-40,ctx.measureText(G.banner).width+40);rr(W/2-w/2,112,w,36,10);ctx.fill();
+    text(G.banner,W/2,130,18,"#fff","center","700");ctx.globalAlpha=1;
+  }
+  if(G.tipT>0&&G.tip){
+    ctx.globalAlpha=Math.min(1,G.tipT);ctx.fillStyle="rgba(15,24,48,.94)";rr(40,H-120,W-80,74,12);ctx.fill();
+    ctx.strokeStyle="#4da3ff";ctx.lineWidth=2;ctx.stroke();
+    text(G.tip[0],58,H-98,17,"#ffd24d","left","800");
+    wrap(G.tip[1],58,H-72,W-120,15,"#e8f0ff");ctx.globalAlpha=1;
+  }
+}
+function wrap(t,x,y,mw,s,col){
+  ctx.font="500 "+s+"px system-ui";const ws=t.split(" ");let line="";
+  for(const w of ws){const test=line+w+" ";if(ctx.measureText(test).width>mw&&line){text(line,x,y,s,col);y+=s+4;line=w+" "}else line=test}
+  text(line,x,y,s,col);
+}
+function draw(){
+  ctx.save();
+  if(G.shake>0)ctx.translate((Math.random()-.5)*8,(Math.random()-.5)*8);
+  drawBg();
+  const seg=Math.min(G.seg,7);
+  if(G.state!=="menu"||G.t>0){
+    drawNode(seg,-60,false);
+    drawNode(seg+1,SEGS[seg].len+70,true);
+    G.obs.forEach(drawObs);G.pk.forEach(drawPick);
+  }
+  drawPacket();
+  G.fx.forEach(p=>{ctx.globalAlpha=Math.max(0,p.life/.6);ctx.fillStyle=p.col;ctx.fillRect(p.x,p.y,6,6)});ctx.globalAlpha=1;
+  G.fl.forEach(f=>{ctx.globalAlpha=Math.min(1,f.life);text(f.txt,f.x+60,f.y,16,f.col,"left","800")});ctx.globalAlpha=1;
+  ctx.restore();
+  drawHud();drawBanners();
+}
+
+/* ============ Boucle & entrées ============ */
+let last=performance.now();
+function loop(now){
+  const dt=Math.min(.05,(now-last)/1000);last=now;
+  update(dt);draw();requestAnimationFrame(loop);
+}
+window.addEventListener("keydown",e=>{
+  const k=e.key;
+  if(k==="ArrowUp"||k==="w"||k==="W"||k==="z"||k==="Z"){setLane(-1);e.preventDefault()}
+  else if(k==="ArrowDown"||k==="s"||k==="S"){setLane(1);e.preventDefault()}
+  else if(k===" "||k==="Enter"&&G.state==="play"){useQos();e.preventDefault()}
+  else if(k==="m"||k==="M")mute=!mute;
+});
+document.getElementById("bUp").onclick=()=>setLane(-1);
+document.getElementById("bDn").onclick=()=>setLane(1);
+document.getElementById("bQ").onclick=useQos;
+let ty=null;
+cv.addEventListener("touchstart",e=>{ty=e.touches[0].clientY},{passive:true});
+cv.addEventListener("touchmove",e=>{
+  if(ty==null)return;const d=e.touches[0].clientY-ty;
+  if(Math.abs(d)>28){setLane(d>0?1:-1);ty=e.touches[0].clientY}
+},{passive:true});
+cv.addEventListener("touchend",()=>{ty=null});
+showIntro();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
