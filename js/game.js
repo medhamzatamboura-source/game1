@@ -167,6 +167,7 @@
     P.wi = wi; P.cam = 0; P.rpki = false; P.drones = [];
     P.items = G.layouts[wi].map(o => Object.assign({}, o, { used: false, y: null }));
     P.banner = 3; P.inLat = P.inBoost = false;
+    const nat = special(world(wi), "nat"); if (nat) say(P, "🔁 " + nat.native + " · 192.168.1.10 → 41.250.8.17", "#9dffcf", 4);
     P.amb = []; const R = rng(wi * 99 + P.i);
     for (let i = 0; i < 26; i++) P.amb.push({ x: R() * W, y: R() * P.vp.h, v: .4 + R(), s: .6 + R() * .8 });
   }
@@ -181,8 +182,9 @@
     P.alarm = { txt, col: sev, dir: wd.dir }; P.alarmT = 5;
   }
   function tip(P, key, isPk) {
-    if (P.seen[key]) return; P.seen[key] = 1;
     const wd = world(P.wi);
+    const sk0 = (key === "qos" && special(wd, "espresso")) || (key === "cul") || (key === "lat" && LATKEY[wd.id]) ? key + "@" + wd.id : key;
+    if (P.seen[sk0]) return; P.seen[sk0] = 1;
     const ui = isPk ? T("pk")[key] : T("hz")[key];
     if (!ui) return;
     let native = "";
@@ -192,8 +194,10 @@
       const sk = key === "boost" ? BOOSTKEY[wd.id] : key === "dragon" ? "dragon" : key === "ball" ? "cricket" : key === "maint" ? "maint" : key === "cut" ? "anchor" : key === "gate" && wd.id === "cn" ? "gate" : key === "hacker" && wd.id === "fr" ? "arp" : key === "lat" ? LATKEY[wd.id] : null;
       const sp = sk && special(wd, sk); if (sp) native = sp.native;
     }
-    if (isPk && key === "cul" && wd.culture) native = wd.culture.native;
-    P.tip = { ico: isPk ? (key === "cul" ? (wd.culture ? wd.culture.emoji : "🎁") : PKICO[key]) : ICON[key] || "", native, dir: wd.dir, name: ui[0], d: ui[1] };
+    if (isPk && key === "cul" && wd.culture) native = wd.culture.native + " (" + tr(wd.culture) + ")";
+    const esp = isPk && key === "qos" && special(wd, "espresso");
+    if (esp) native = esp.native;
+    P.tip = { ico: isPk ? (key === "cul" ? (wd.culture ? wd.culture.emoji : "🎁") : esp ? "☕" : PKICO[key]) : ICON[key] || "", native, dir: wd.dir, name: ui[0], d: ui[1] };
     P.tipT = 4.6;
   }
   function probe(P) {
@@ -255,7 +259,7 @@
     o.used = true; burst(P, PX + 30, P.y, "#37e6a0", 10); beep(990, .09, "triangle");
     const wd = world(P.wi);
     tip(P, o.t, true);
-    if (o.t === "qos") { P.qosT = 4; floater(P, "QoS EF ⭐", "#ffd24d"); }
+    if (o.t === "qos") { P.qosT = 4; const es = special(wd, "espresso"); floater(P, es ? "☕ " + es.native : "QoS EF ⭐", "#ffd24d"); }
     else if (o.t === "fec") { P.health = Math.min(100, P.health + 15); floater(P, "FEC +15 🧩", "#37e6a0"); }
     else if (o.t === "lock") { P.lockT = 10; floater(P, "🔒 MACsec/IPsec", "#37e6a0"); }
     else if (o.t === "rpki") { P.rpki = true; floater(P, "🛡️ RPKI ROA", "#37e6a0"); }
@@ -424,7 +428,7 @@
     const q = src[Math.floor(Math.random() * src.length)];
     G.usedQ.add(q.id);
     const order = [0, 1, 2].sort(() => Math.random() - .5);
-    G.quiz = { q, order, correct: order.indexOf(0), ans: {}, t: 0, rev: false, revT: 0 };
+    G.quiz = { q, order, correct: order.indexOf(0), ans: {}, t: 0, rev: false, revT: 0, wi: lead.wi };
     G.P.forEach(P => { if (P.ctrl === "cpu") P.cpuAns = { at: 2.5 + Math.random() * 5, idx: Math.random() < .65 ? G.quiz.correct : (G.quiz.correct + 1 + Math.floor(Math.random() * 2)) % 3 }; });
     G.state = "quiz"; G.quizClock = 0;
     beep(784, .1, "triangle"); beep(988, .15, "triangle");
@@ -496,7 +500,12 @@
       h += '</div>';
     });
     h += '</div>';
-    if (Z.rev) h += '<div class="exp">💡 ' + esc(tr(q.exp)) + '</div><button class="btn" id="qgo">' + T("cont") + '</button>';
+    if (Z.rev) {
+      h += '<div class="exp">💡 ' + esc(tr(q.exp)) + '</div>';
+      const fw = world(Z.wi);
+      if (fw && fw.fact) h += '<div class="exp fact">' + fw.flag + ' <b>' + T("funFact") + '</b> ' + esc(tr(fw.fact)) + ' <span class="nat" lang="' + esc(fw.lang) + '" dir="' + esc(fw.dir) + '">« ' + esc(fw.slogan ? fw.slogan.native : "") + ' »</span></div>';
+      h += '<button class="btn" id="qgo">' + T("cont") + '</button>';
+    }
     $("qbox").innerHTML = h;
     $("qbox").querySelectorAll("button[data-p]").forEach(b => b.onclick = () => answer(+b.dataset.p, +b.dataset.a));
     const go = $("qgo"); if (go) go.onclick = endQuiz;
@@ -564,7 +573,7 @@
     ctx.restore();
     // décor emoji (rangée au-dessus du tube, masquée quand une info s'affiche)
     const deco = wd.deco || [];
-    if (deco.length && !(P.tipT > 0 && P.banner <= 0) && !(P.msgT > 0)) {
+    if (deco.length && !((P.tipT > 0 || P.alarmT > 0) && P.banner <= 0) && !(P.msgT > 0)) {
       ctx.globalAlpha = .45;
       const dper = 190, sh = P.cam * .35, first = Math.floor(sh / dper);
       for (let i = 0; i < 7; i++) emoji(deco[(first + i) % deco.length], (first + i) * dper - sh + 40, 30 + (tubeTop(P) - 30) / 2, 18 * Math.min(k, 1.2));
@@ -646,7 +655,7 @@
       if (o.used) return;
       const y = laneY(P, o.lane) + Math.sin(G.time * 4 + o.x) * 4;
       ctx.shadowColor = o.t === "sab" ? "#ff4d6d" : "#37e6a0"; ctx.shadowBlur = 14;
-      emoji(o.t === "cul" ? (wd.culture ? wd.culture.emoji : "🎁") : PKICO[o.t], sx, y, 28 * k); ctx.shadowBlur = 0;
+      emoji(o.t === "cul" ? (wd.culture ? wd.culture.emoji : "🎁") : o.t === "qos" && special(wd, "espresso") ? "☕" : PKICO[o.t], sx, y, 28 * k); ctx.shadowBlur = 0;
       return;
     }
     const y = o.y != null ? o.y : laneY(P, o.lane);
@@ -716,8 +725,7 @@
     if (P.rpki) { emoji("🛡️", ix, 15, 14); ix += 20; }
     emoji(wd.flag || "", 700, 15, 16);
     txt("AS" + wd.asn, 712, 15, 11, (wd.palette || {}).accent || "#fff", "left", 800);
-    if (P.alarmT > 0 && P.alarm) { ctx.globalAlpha = Math.min(1, P.alarmT); txt("🚨 " + P.alarm.txt, W - 8, 15, 11, P.alarm.col, "right", 700, P.alarm.dir === "rtl" ? "rtl" : "ltr", W - 770); ctx.globalAlpha = 1; }
-    else txt(world(P.wi).carrier || "", W - 8, 15, 11, "#8da2c8", "right", 600, "ltr", W - 770);
+    txt(world(P.wi).carrier || "", W - 8, 15, 11, "#8da2c8", "right", 600, "ltr", W - 770);
   }
   function drawPlayerOverlay(P) {
     const vh = P.vp.h, k = P.vp.k, wd = world(P.wi);
@@ -730,7 +738,7 @@
       emoji(wd.flag, W / 2 - 290, by + bh / 2, 34 * Math.min(k, 1.25));
       txt(wd.welcome ? wd.welcome.native : wd.carrier, W / 2 + 20, by + bh * .3, 22 * Math.min(k, 1.2), "#fff", "center", 800, wd.dir, 560);
       txt(wd.welcome ? tr(wd.welcome) : "", W / 2 + 20, by + bh * .58, 13, "#cfe0ff", "center", 600, "ltr", 560);
-      txt("AS" + wd.asn + " · " + (wd.ix || "") + " · " + (wd.slogan ? wd.slogan.native : ""), W / 2 + 20, by + bh * .82, 12, (wd.palette || {}).accent || "#ffd24d", "center", 700, wd.dir, 560);
+      txt(wd.slogan ? "« " + wd.slogan.native + " »" : (wd.ix || ""), W / 2 + 20, by + bh * .82, 12, (wd.palette || {}).accent || "#ffd24d", "center", 700, wd.dir, 560);
       ctx.globalAlpha = 1;
     }
     // rangée d'info entre le HUD et le tube : message > astuce > décor
@@ -752,6 +760,14 @@
         txt(head, 56, ty + th / 2, 13, "#ffd24d", "left", 800, "ltr", 330);
         txt("— " + P.tip.d, 64 + hw, ty + th / 2, 12, "#e8f0ff", "left", 500, "ltr", W - 100 - hw);
       }
+      ctx.globalAlpha = 1;
+    } else if (P.alarmT > 0 && P.alarm && P.banner <= 0) {
+      ctx.globalAlpha = Math.min(1, P.alarmT);
+      ctx.font = "700 13px " + FONT; const w = Math.min(W - 32, ctx.measureText(P.alarm.txt).width + 60);
+      ctx.fillStyle = "rgba(20,4,10,.88)"; rr(W / 2 - w / 2, ry0 + rh / 2 - 13, w, 26, 9); ctx.fill();
+      ctx.strokeStyle = P.alarm.col; ctx.lineWidth = 1.2; ctx.stroke();
+      emoji("🚨", W / 2 - w / 2 + 16, ry0 + rh / 2, 13);
+      txt(P.alarm.txt, W / 2 + 10, ry0 + rh / 2, 13, P.alarm.col, "center", 700, P.alarm.dir === "rtl" ? "rtl" : "ltr", W - 90);
       ctx.globalAlpha = 1;
     }
     if (P.warnT > 0) { ctx.globalAlpha = Math.min(1, P.warnT); ctx.fillStyle = "rgba(60,0,10,.85)"; rr(W - 330, tubeTop(P) + 4, 316, 24, 8); ctx.fill(); txt(T("sabIn") + " " + P.warnFrom + " ⚔️", W - 22, tubeTop(P) + 16, 13, "#ff6b81", "right", 800, "ltr", 300); ctx.globalAlpha = 1; }
@@ -975,5 +991,5 @@
   requestAnimationFrame(loop);
 
   // Accès pour les tests automatisés
-  window.__PR = { get G() { return G; }, update, startGame, answer, endQuiz, startQuiz, useFrr, setLane, showResults, showMenu, genWorld, laneY, WCFG, setLang: l => { LANG = l; } };
+  window.__PR = { get G() { return G; }, enterWorld, hit, update, startGame, answer, endQuiz, startQuiz, useFrr, setLane, showResults, showMenu, genWorld, laneY, WCFG, setLang: l => { LANG = l; } };
 })();
